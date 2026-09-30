@@ -62,7 +62,11 @@ func newCrawler(urls []string, depth, workers int, requestTimeout time.Duration,
 		depth:          depth,
 		requestTimeout: requestTimeout,
 		log:            logger,
-		client:         &http.Client{},
+		client: &http.Client{
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 	for _, raw := range urls {
 		raw = strings.TrimSpace(raw)
@@ -188,14 +192,6 @@ func (c *crawler) download(ctx context.Context, j job) (string, []string, bool) 
 		return "", nil, false
 	}
 
-	// клиент сам ходит за редиректом; если уехали на другой сайт — страницу не берём
-	if resp.Request != nil && resp.Request.URL != nil {
-		if !sameHost(resp.Request.URL.String(), j.site) {
-			c.log.Printf("skip redirect url=%s location=%s", j.url, resp.Request.URL.String())
-			return "", nil, false
-		}
-	}
-
 	ct := resp.Header.Get("Content-Type")
 	if !isHTML(ct) {
 		c.log.Printf("skip non-html url=%s content-type=%q", j.url, ct)
@@ -207,11 +203,7 @@ func (c *crawler) download(ctx context.Context, j job) (string, []string, bool) 
 		c.log.Printf("error url=%s err=%v", j.url, err)
 		return "", nil, false
 	}
-	base := j.url
-	if resp.Request != nil && resp.Request.URL != nil {
-		base = resp.Request.URL.String()
-	}
-	title, links, err := parsePage(base, bytes.NewReader(body))
+	title, links, err := parsePage(j.url, bytes.NewReader(body))
 	if err != nil {
 		c.log.Printf("error url=%s err=%v", j.url, err)
 		return "", nil, false
@@ -300,24 +292,19 @@ func absURL(pageURL, href string) string {
 	if strings.HasPrefix(href, "mailto:") || strings.HasPrefix(href, "javascript:") {
 		return ""
 	}
-	if strings.HasPrefix(href, "http://") || strings.HasPrefix(href, "https://") {
-		return href
-	}
-	u, err := url.Parse(pageURL)
-	if err != nil || u.Host == "" {
+	base, err := url.Parse(pageURL)
+	if err != nil {
 		return ""
 	}
-	if strings.HasPrefix(href, "/") {
-		return u.Scheme + "://" + u.Host + href
+	ref, err := url.Parse(href)
+	if err != nil {
+		return ""
 	}
-	dir := u.Path
-	i := strings.LastIndex(dir, "/")
-	if i >= 0 {
-		dir = dir[:i+1]
-	} else {
-		dir = "/"
+	abs := base.ResolveReference(ref)
+	if (abs.Scheme != "http" && abs.Scheme != "https") || abs.Host == "" {
+		return ""
 	}
-	return u.Scheme + "://" + u.Host + dir + href
+	return abs.String()
 }
 
 func textOf(n *html.Node) string {
